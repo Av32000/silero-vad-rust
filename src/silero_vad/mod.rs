@@ -31,3 +31,9 @@ impl From<ndarray::ShapeError> for SileroError {
         Self::Message(value.to_string())
     }
 }
+
+impl From<ort::Error<ort::session::builder::SessionBuilder>> for SileroError {
+    fn from(err: ort::Error<ort::session::builder::SessionBuilder>) -> Self {
+        SileroError::Message(err.to_string())
+    }
+}

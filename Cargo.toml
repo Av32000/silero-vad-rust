@@ -22,7 +22,7 @@ ort-load-dynamic = ["ort/load-dynamic"]
 # Safe bindings for ONNX Runtime 1.22
 ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
 # n-dimensional array math with slicing and views (kept in sync with ort)
-ndarray = "0.16.1"
+ndarray = "0.17.2"
 # Flexible concrete Error type for ergonomic error handling
 anyhow = "1.0.100"
 # derive(Error) for strongly typed error enums
