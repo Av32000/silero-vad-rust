@@ -2,7 +2,7 @@ use crate::silero_vad::data::{ONNX_MODELS, SILERO_VAD_ONNX, SILERO_VAD_OP15_ONNX
 use crate::silero_vad::{Result, SileroError};
 
 use ndarray::{Array1, Array2, ArrayD, Axis, s};
-use ort::{execution_providers::CPUExecutionProvider, session::Session, value::Tensor};
+use ort::{ep::CPU, session::Session, value::Tensor};
 use std::path::{Path, PathBuf};
 
 /// Configuration for loading Silero VAD models.
@@ -48,14 +48,22 @@ impl OnnxModel {
             )));
         }
 
-        let mut builder = Session::builder()?
-            .with_intra_threads(1)?
-            .with_inter_threads(1)?;
+        let mut builder = Session::builder()
+            .map_err(|e| SileroError::Message(e.to_string()))?
+            .with_intra_threads(1)
+            .map_err(|e| SileroError::Message(e.to_string()))?
+            .with_inter_threads(1)
+            .map_err(|e| SileroError::Message(e.to_string()))?;
+
         if force_cpu {
-            builder =
-                builder.with_execution_providers([CPUExecutionProvider::default().build()])?;
+            builder = builder
+                .with_execution_providers([CPU::default().build()])
+                .map_err(|e| SileroError::Message(e.to_string()))?;
         }
-        let session = builder.commit_from_file(path)?;
+
+        let session = builder
+            .commit_from_file(path)
+            .map_err(|e| SileroError::Message(e.to_string()))?;
 
         let sample_rates = if path
             .file_name()
@@ -168,7 +176,8 @@ impl OnnxModel {
     /// The `chunk` length must match the expected window for the provided
     /// sample rate (512 samples at 16 kHz, 256 samples at 8 kHz).
     pub fn forward_chunk(&mut self, chunk: &[f32], sr: u32) -> Result<Array2<f32>> {
-        let array = Array2::from_shape_vec((1, chunk.len()), chunk.to_vec())?;
+        let array = Array2::from_shape_vec((1, chunk.len()), chunk.to_vec())
+            .map_err(|e| SileroError::Message(e.to_string()))?;
         self.forward(array, sr)
     }
 
@@ -208,12 +217,19 @@ impl OnnxModel {
             .slice_mut(s![.., context_size..])
             .assign(&input);
 
-        let input_tensor = Tensor::from_array(concatenated.clone())?;
-        let state_tensor = Tensor::from_array(self.state.clone())?;
-        let sr_tensor = Tensor::from_array(sr_array)?;
+        let input_tensor = Tensor::from_array(concatenated.clone())
+            .map_err(|e| SileroError::Message(e.to_string()))?;
+        let state_tensor = Tensor::from_array(self.state.clone())
+            .map_err(|e| SileroError::Message(e.to_string()))?;
+        let sr_tensor =
+            Tensor::from_array(sr_array).map_err(|e| SileroError::Message(e.to_string()))?;
+
         let inputs = ort::inputs![input_tensor, state_tensor, sr_tensor];
 
-        let outputs = self.session.run(inputs)?;
+        let mut outputs = self
+            .session
+            .run(inputs)
+            .map_err(|e| SileroError::Message(e.to_string()))?;
 
         let state_key = if outputs.contains_key("stateN") {
             "stateN"
@@ -225,10 +241,16 @@ impl OnnxModel {
                 .nth(1)
                 .map(|(name, _)| name)
                 .unwrap_or("state")
-        };
+        }
+        .to_string();
 
-        let (state_shape, state_data) = outputs[state_key].try_extract_tensor::<f32>()?;
-        self.state = ArrayD::<f32>::from_shape_vec(state_shape.to_ixdyn(), state_data.to_vec())?;
+        let state_tensor: Tensor<f32> = outputs
+            .remove(state_key.as_str())
+            .ok_or_else(|| SileroError::Message(format!("Missing state output: {}", state_key)))?
+            .downcast()
+            .map_err(|e| SileroError::Message(e.to_string()))?;
+
+        self.state = state_tensor.extract_array().into_owned();
 
         let output_key = if outputs.contains_key("output") {
             "output"
@@ -238,15 +260,23 @@ impl OnnxModel {
                 .next()
                 .map(|(name, _)| name)
                 .unwrap_or("output")
-        };
+        }
+        .to_string();
 
-        let (_output_shape, output_data) = outputs[output_key].try_extract_tensor::<f32>()?;
-        let total = output_data.len();
+        let output_tensor: Tensor<f32> = outputs
+            .remove(output_key.as_str())
+            .ok_or_else(|| SileroError::Message(format!("Missing output: {}", output_key)))?
+            .downcast()
+            .map_err(|e| SileroError::Message(e.to_string()))?;
+
+        let output_array = output_tensor.extract_array();
+        let total = output_array.len();
         if batch_size == 0 {
             return Err(SileroError::Message(
                 "Batch size must be greater than zero".to_string(),
             ));
         }
+
         let columns = if total % batch_size == 0 {
             total / batch_size
         } else {
@@ -254,8 +284,13 @@ impl OnnxModel {
                 "Unexpected output shape: elements ({total}) not divisible by batch size {batch_size}"
             )));
         };
+
         let columns = columns.max(1);
-        let output = Array2::<f32>::from_shape_vec((batch_size, columns), output_data.to_vec())?;
+        let output = Array2::<f32>::from_shape_vec(
+            (batch_size, columns),
+            output_array.iter().cloned().collect(),
+        )
+        .map_err(|e| SileroError::Message(e.to_string()))?;
 
         let new_context = input
             .slice(s![.., (chunk_size - context_size)..])
@@ -269,7 +304,8 @@ impl OnnxModel {
 
     /// Processes an entire audio buffer by tiling it into model-sized chunks.
     pub fn audio_forward(&mut self, audio: &[f32], sr: u32) -> Result<Array2<f32>> {
-        let array = Array2::from_shape_vec((1, audio.len()), audio.to_vec())?;
+        let array = Array2::from_shape_vec((1, audio.len()), audio.to_vec())
+            .map_err(|e| SileroError::Message(e.to_string()))?;
         let (mut array, sr) = self.normalize_input(array, sr)?;
         self.state = ArrayD::<f32>::zeros(ndarray::IxDyn(&[2, 1, 128]));
         self.context = None;
@@ -294,7 +330,8 @@ impl OnnxModel {
         }
 
         let views: Vec<_> = outputs.iter().map(|arr| arr.view()).collect();
-        let concatenated = ndarray::concatenate(Axis(1), &views)?;
+        let concatenated = ndarray::concatenate(Axis(1), &views)
+            .map_err(|e| SileroError::Message(e.to_string()))?;
         Ok(concatenated)
     }
 
